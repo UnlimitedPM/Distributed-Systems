@@ -1,26 +1,23 @@
 const express = require('express');
 const bodyParser = require('body-parser');
-const { randomBytes } = require('crypto');
 const cors = require('cors');
+const db = require('./dbConnection'); // [cite: 239-240]
 
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
-// Constantes d'état [cite: 108-111]
+// Constantes d'état [cite: 108-111, 216-221]
 const STATE_CREATED = 0;
 const STATE_EXECUTED = 1;
 const STATE_SOLD = 2;
 
-// Définition des transitions valides 
 const VALID_TRANSITIONS = {
     [STATE_CREATED]: [STATE_EXECUTED],
     [STATE_EXECUTED]: [STATE_SOLD]
 };
 
-let orders = [];
-
-// 1. Create Order: POST /orders [cite: 47-58]
+// 1. Create Order: POST /orders [cite: 242, 252-253, 257]
 app.post('/orders', (req, res) => {
     const { name, isin, amount } = req.body;
 
@@ -29,86 +26,139 @@ app.post('/orders', (req, res) => {
         return res.status(400).send("Missing required fields");
     }
 
-    const newOrder = {
-        id: randomBytes(4).toString('hex'), // ID 32-bit hex [cite: 51]
-        name: name,
-        isin: isin,
-        amount: amount,
-        price: 0, // Défaut [cite: 58]
-        state: STATE_CREATED  // Défaut [cite: 58]
-    };
-
-    orders.push(newOrder);
-    console.info(`Order created: ${newOrder.id}`);
-    res.status(201).json(newOrder);
+    db.execute(
+        'INSERT INTO orders (name, isin, amount, price, state) VALUES (?, ?, ?, 0, 0)',
+        [name, isin, amount]
+    )
+    .then(([result]) => {
+        console.info(`Order created in DB with ID: ${result.insertId}`);
+        res.status(201).json({
+            id: result.insertId,
+            name,
+            isin,
+            amount,
+            price: 0,
+            state: 0
+        });
+    })
+    .catch(err => {
+        console.error("DB Error on Create:", err);
+        res.status(500).send("Internal Server Error");
+    });
 });
 
-// 2. Read All: GET /orders (avec filtrage) [cite: 78-88]
+// 2. Read All: GET /orders [cite: 85-88, 257]
 app.get('/orders', (req, res) => {
-    const stateQuery = req.query.state;
-    
-    if (stateQuery !== undefined) {
-        const filteredOrders = orders.filter(o => o.state == parseInt(stateQuery));
-        return res.status(200).json(filteredOrders);
+    const state = req.query.state;
+    let query = 'SELECT * FROM orders';
+    let params = [];
+
+    if (state !== undefined) {
+        query += ' WHERE state = ?';
+        params.push(state);
     }
-    
-    res.status(200).json(orders);
+
+    db.execute(query, params)
+        .then(([rows]) => res.status(200).json(rows))
+        .catch(err => {
+            console.error(err);
+            res.status(500).send("Error reading orders");
+        });
 });
 
-// 3. Read With ID: GET /orders/:id [cite: 89-93]
+// 3. Read With ID: GET /orders/:id [cite: 90-93, 257]
 app.get('/orders/:id', (req, res) => {
-    const order = orders.find(o => o.id === req.params.id);
-    if (!order) {
-        console.error(`Order not found: ${req.params.id}`);
-        return res.status(404).send('Order not found');
-    }
-    res.status(200).json(order);
+    db.execute('SELECT * FROM orders WHERE id = ?', [req.params.id])
+        .then(([rows]) => {
+            if (rows.length === 0) return res.status(404).send('Order not found');
+            res.status(200).json(rows[0]);
+        })
+        .catch(err => res.status(500).send(err));
 });
 
-// 4. Update Amount: PATCH /orders/:id/amount [cite: 94-101]
+// 4. Update Amount: PATCH /orders/:id/amount [cite: 94-101, 257]
 app.patch('/orders/:id/amount', (req, res) => {
-    const order = orders.find(o => o.id === req.params.id);
-    if (!order) return res.status(404).send('Order not found');
+    const id = req.params.id;
+    const newAmount = req.body.amount;
 
-    // Vérification de l'état (uniquement si created) 
-    if (order.state !== STATE_CREATED) {
-        return res.status(400).send('Cannot update amount of an order that is not in "created" state');
-    }
-
-    order.amount = req.body.amount;
-    res.status(200).json(order);
+    db.execute('SELECT state FROM orders WHERE id = ?', [id])
+        .then(([rows]) => {
+            if (rows.length === 0) {
+                res.status(404).send('Order not found');
+                return null; // On retourne null pour signaler au prochain .then de ne rien faire
+            }
+            if (rows[0].state !== STATE_CREATED) {
+                res.status(400).send('Only created orders can be modified');
+                return null; 
+            }
+            return db.execute('UPDATE orders SET amount = ? WHERE id = ?', [newAmount, id]);
+        })
+        .then((result) => {
+            // On n'envoie la réponse 200 que si le UPDATE a vraiment eu lieu (result n'est pas null)
+            if (result) {
+                console.info(`Amount updated for order ${id}`);
+                res.status(200).send('Amount updated');
+            }
+        })
+        .catch(err => {
+            if (!res.headersSent) res.status(500).send(err);
+        });
 });
 
-// 5. Update State: PATCH /orders/:id/state [cite: 106-123]
+// 5. Update State: PATCH /orders/:id/state [cite: 106-123, 257]
 app.patch('/orders/:id/state', (req, res) => {
-    const order = orders.find(o => o.id === req.params.id);
-    if (!order) return res.status(404).send('Order not found');
-
+    const id = req.params.id;
     const newState = parseInt(req.body.state);
-    const allowedTransitions = VALID_TRANSITIONS[order.state] || [];
 
-    // Vérification de la transition valide [cite: 112, 116]
-    if (!allowedTransitions.includes(newState)) {
-        console.warn(`Invalid state transition attempted for ${order.id}: ${order.state} -> ${newState}`);
-        return res.status(400).send('Invalid state transition');
-    }
+    db.execute('SELECT state FROM orders WHERE id = ?', [id])
+        .then(([rows]) => {
+            if (rows.length === 0) {
+                res.status(404).send('Order not found');
+                return null;
+            }
+            
+            const currentState = rows[0].state;
+            const allowed = VALID_TRANSITIONS[currentState] || [];
 
-    order.state = newState;
-    res.status(200).json(order);
+            if (!allowed.includes(newState)) {
+                console.warn(`Invalid transition: ${currentState} -> ${newState}`);
+                res.status(400).send('Invalid state transition');
+                return null;
+            }
+
+            return db.execute('UPDATE orders SET state = ? WHERE id = ?', [newState, id]);
+        })
+        .then((result) => {
+            if (result) res.status(200).send('State updated');
+        })
+        .catch(err => {
+            if (!res.headersSent) res.status(500).send(err);
+        });
 });
 
-// 6. Delete Order: DELETE /orders/:id [cite: 124-128]
+// 6. Delete Order: DELETE /orders/:id [cite: 124-128, 257]
 app.delete('/orders/:id', (req, res) => {
-    const index = orders.findIndex(o => o.id === req.params.id);
-    if (index === -1) return res.status(404).send('Order not found');
+    const id = req.params.id;
 
-    // Vérification de l'état avant suppression 
-    if (orders[index].state !== STATE_CREATED) {
-        return res.status(400).send('Only orders in "created" state can be deleted');
-    }
+    db.execute('SELECT state FROM orders WHERE id = ?', [id])
+        .then(([rows]) => {
+            if (rows.length === 0) {
+                res.status(404).send('Order not found');
+                return null;
+            }
+            if (rows[0].state !== STATE_CREATED) {
+                res.status(400).send('Only created orders can be deleted');
+                return null;
+            }
 
-    orders.splice(index, 1);
-    res.status(204).send();
+            return db.execute('DELETE FROM orders WHERE id = ?', [id]);
+        })
+        .then((result) => {
+            if (result) res.status(204).send();
+        })
+        .catch(err => {
+            if (!res.headersSent) res.status(500).send(err);
+        });
 });
 
 const PORT = 6010;

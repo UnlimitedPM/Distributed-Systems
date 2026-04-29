@@ -1,14 +1,22 @@
 version: '3.8'
 
 services:
-  db:
+  mysqlservice:
     image: mysql:8.0
-    container_name: stock-db
     restart: none
     environment:
-      MYSQL_ROOT_PASSWORD: root
       MYSQL_DATABASE: stock_service
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_USER: user
+      MYSQL_PASSWORD: password
     ports:
-      - "3306:3306"
+      - "3307:3306"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  orderservice:
+    build: .
+    ports:
+      - "6010:6010"
+    depends_on:
+      - mysqlservice

@@ -13,10 +13,16 @@ services:
       - "3307:3306"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      
+  confirmation-service:
+    build: ./confirmation-service
+    ports:
+      - "4000:4000"
 
-  orderservice:
-    build: .
+  order-service:
+    build: ./order-service
     ports:
       - "6010:6010"
     depends_on:
       - mysqlservice
+      - confirmation-service

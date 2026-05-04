@@ -1,0 +1,15 @@
+const STATE_CREATED = 0;
+const STATE_CONFIRMED = 1; // Nouvel état [cite: 467]
+const STATE_EXECUTED = 2;
+const STATE_SOLD = 3;
+
+const VALID_TRANSITIONS = {
+    [STATE_CREATED]: [STATE_CONFIRMED], // Transition vers confirmation [cite: 470]
+    [STATE_CONFIRMED]: [STATE_EXECUTED],
+    [STATE_EXECUTED]: [STATE_SOLD]
+};
+
+module.exports = {
+    STATE_CREATED, STATE_CONFIRMED, STATE_EXECUTED, STATE_SOLD,
+    VALID_TRANSITIONS
+};

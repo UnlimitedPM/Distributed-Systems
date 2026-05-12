@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package confirmation;
+
+// Définition du service
+service Confirmation {
+  rpc ConfirmOrder (ConfirmRequest) returns (ConfirmResponse);
+}
+
+// Paramètre d'entrée (Requête)
+message ConfirmRequest {
+  string isin = 1;
+}
+
+// Valeurs de retour (Réponse)
+message ConfirmResponse {
+  bool confirmed = 1;
+  float price = 2;
+}

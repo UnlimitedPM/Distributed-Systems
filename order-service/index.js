@@ -1,91 +1,99 @@
 const express = require('express');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const axios = require('axios');
 const db = require('./dbConnection');
-const { 
-    STATE_CREATED, 
-    STATE_CONFIRMED, 
-    VALID_TRANSITIONS 
-} = require('./constants'); //
+const gRPC = require('@grpc/grpc-js'); // [cite: 179, 349]
+const protoLoader = require('@grpc/proto-loader'); // [cite: 179, 350]
+const { STATE_CREATED, STATE_CONFIRMED, VALID_TRANSITIONS } = require('./constants');
 
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
+// --- CONFIGURATION CLIENT gRPC --- [cite: 343-347]
+const packageDefinition = protoLoader.loadSync('./confirmation.proto', {
+    keepCase: true, longs: String, enums: String, defaults: true, oneofs: true
+});
+const confirmationProto = gRPC.loadPackageDefinition(packageDefinition).confirmation;
+
+// Création du stub pour parler au service de confirmation [cite: 359-360]
+const client = new confirmationProto.Confirmation(
+    'confirmation-service:4000', 
+    gRPC.credentials.createInsecure()
+);
+
 /**
- * Appelle le service de confirmation
+ * Fonction locale qui exécute l'appel RPC [cite: 348, 361-372]
  */
-async function callConfirmationService(isin) {
-    try {
-        const response = await axios.get(`http://confirmation-service:4000/confirmation/${isin}`);
-        return response.data; // { confirmed: true/false, price: XX }
-    } catch (error) {
-        console.error("Call to confirmation service failed");
-        return { confirmed: false, price: 0 };
-    }
+function callConfirmationService(isin) {
+    return new Promise((resolve, reject) => {
+        client.ConfirmOrder({ isin: isin }, (error, response) => {
+            if (error) {
+                console.error("gRPC Call failed");
+                reject(error);
+            } else {
+                resolve(response);
+            }
+        });
+    });
 }
+
+// --- ROUTES REST ---
 
 // 1. POST /orders : Créer un ordre
 app.post('/orders', async (req, res) => {
     const { name, isin, amount } = req.body;
-    if (!name || !isin || !amount) return res.status(400).send("Missing fields");
-
     try {
         const [result] = await db.execute(
             'INSERT INTO orders (name, isin, amount, price, state) VALUES (?, ?, ?, 0, 0)',
             [name, isin, amount]
         );
-        res.status(201).json({ id: result.insertId, name, isin, amount, price: 0, state: STATE_CREATED });
+        res.status(201).json({ id: result.insertId, name, isin, amount, state: 0 });
     } catch (err) {
-        res.status(500).send("Database error");
+        res.status(500).send(err.message);
     }
 });
 
-// 2. GET /orders : Liste tous les ordres (avec filtre optionnel)
+// 2. GET /orders : Voir tous les ordres
 app.get('/orders', async (req, res) => {
-    const state = req.query.state;
-    let query = 'SELECT * FROM orders';
-    let params = [];
-    if (state !== undefined) {
-        query += ' WHERE state = ?';
-        params.push(state);
-    }
     try {
-        const [rows] = await db.execute(query, params);
+        const [rows] = await db.execute('SELECT * FROM orders');
         res.status(200).json(rows);
     } catch (err) {
-        res.status(500).send("Error reading database");
+        res.status(500).send(err.message);
     }
 });
 
-// 3. GET /orders/:id : Lire un ordre spécifique (C'est la route qui manquait !)
+// 3. GET /orders/:id : Voir un ordre spécifique
 app.get('/orders/:id', async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT * FROM orders WHERE id = ?', [req.params.id]);
-        if (rows.length === 0) return res.status(404).send('Order not found');
+        if (rows.length === 0) return res.status(404).send('Not found');
         res.status(200).json(rows[0]);
     } catch (err) {
         res.status(500).send(err.message);
     }
 });
 
-// 4. PATCH /orders/:id/amount : Modifier la quantité (seulement état 0)
+// 4. PATCH /orders/:id/amount : Modifier la quantité 
 app.patch('/orders/:id/amount', async (req, res) => {
-    const { amount } = req.body;
     try {
         const [rows] = await db.execute('SELECT state FROM orders WHERE id = ?', [req.params.id]);
         if (rows.length === 0) return res.status(404).send('Not found');
-        if (rows[0].state !== STATE_CREATED) return res.status(400).send('Modification allowed only in state 0');
+        
+        // Bloquer si l'état n'est pas 0 (Created) [cite: 68]
+        if (rows[0].state !== STATE_CREATED) {
+            return res.status(400).send('Updating amount is only possible in state created (0)');
+        }
 
-        await db.execute('UPDATE orders SET amount = ? WHERE id = ?', [amount, req.params.id]);
+        await db.execute('UPDATE orders SET amount = ? WHERE id = ?', [req.body.amount, req.params.id]);
         res.status(200).send('Amount updated');
     } catch (err) {
         res.status(500).send(err.message);
     }
 });
 
-// 5. PATCH /orders/:id/state : Changer d'état et appeler la confirmation
+// 5. PATCH /orders/:id/state : Transition d'état via gRPC [cite: 174, 374-376]
 app.patch('/orders/:id/state', async (req, res) => {
     const id = req.params.id;
     const newState = parseInt(req.body.state);
@@ -96,17 +104,16 @@ app.patch('/orders/:id/state', async (req, res) => {
         
         const order = rows[0];
         const allowed = VALID_TRANSITIONS[order.state] || [];
-        if (!allowed.includes(newState)) return res.status(400).send('Invalid state transition');
+        if (!allowed.includes(newState)) return res.status(400).send('Invalid transition');
 
-        // Logique spécifique pour la transition vers l'état CONFIRMED (1)
         if (newState === STATE_CONFIRMED) {
+            // Utilisation de la fonction gRPC exportée [cite: 374-376]
             const result = await callConfirmationService(order.isin);
-            if (!result.confirmed) return res.status(400).send('Confirmation failed by external service');
+            if (!result.confirmed) return res.status(400).send('Confirmation failed');
             
-            // On utilise "result.price || 0" pour éviter l'erreur SQL "undefined"
             await db.execute('UPDATE orders SET state = ?, price = ? WHERE id = ?', 
                 [STATE_CONFIRMED, result.price || 0, id]);
-            return res.status(200).send('Order confirmed and price updated');
+            return res.status(200).send('Confirmed via gRPC');
         }
 
         await db.execute('UPDATE orders SET state = ? WHERE id = ?', [newState, id]);
@@ -116,14 +123,16 @@ app.patch('/orders/:id/state', async (req, res) => {
     }
 });
 
-// 6. DELETE /orders/:id : Supprimer un ordre (états 0 et 1 autorisés)
+// 6. DELETE /orders/:id : Supprimer un ordre 
 app.delete('/orders/:id', async (req, res) => {
     try {
         const [rows] = await db.execute('SELECT state FROM orders WHERE id = ?', [req.params.id]);
         if (rows.length === 0) return res.status(404).send('Not found');
         
-        // Suppression interdite si l'état est supérieur à 1 (confirmé)
-        if (rows[0].state > STATE_CONFIRMED) return res.status(400).send('Only created or confirmed orders can be deleted');
+        // Autorisé seulement en état 0 ou 1 [cite: 67]
+        if (rows[0].state > STATE_CONFIRMED) {
+            return res.status(400).send('Deletion is only possible in states created (0) and confirmed (1)');
+        }
 
         await db.execute('DELETE FROM orders WHERE id = ?', [req.params.id]);
         res.status(204).send();
@@ -132,5 +141,4 @@ app.delete('/orders/:id', async (req, res) => {
     }
 });
 
-// Port d'écoute
-app.listen(6010, () => console.info("Order Service is running on port 6010"));
+app.listen(6010, () => console.info("Order Service running on port 6010"));

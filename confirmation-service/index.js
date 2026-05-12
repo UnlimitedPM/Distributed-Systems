@@ -1,58 +1,34 @@
-const express = require('express');
-const bodyParser = require('body-parser');
-const cors = require('cors');
-const axios = require('axios');
+const gRPC = require('@grpc/grpc-js');
+const protoLoader = require('@grpc/proto-loader');
+const getPriceLogic = require('./service'); // Import de la logique[cite: 3]
 
-const app = express();
-app.use(bodyParser.json());
-app.use(cors());
+// Chargement du fichier proto[cite: 3]
+const packageDef = protoLoader.loadSync('confirmation.proto', {});
+const gRPCObject = gRPC.loadPackageDefinition(packageDef);
+const confirmationPackage = gRPCObject.confirmation;
 
-const PORT = 4000; // [cite: 535]
+// Définition de la méthode RPC[cite: 3]
+async function ConfirmOrder(call, callback) {
+    const isin = call.request.isin;
+    console.info(`>>> gRPC Request received for ISIN: ${isin}`);
 
-/**
- * Récupère le prix sur l'API externe [cite: 516-524]
- */
-async function getPriceData(isin) {
-    try {
-        const url = `https://onlineweiterbildung-reutlingen-university.de/vswsp4/index.php?isin=${isin}`;
-        const response = await axios.get(url);
-        return response.data; // {isin, price, name}
-    } catch (error) {
-        console.error("External Price API error [cite: 522]");
-        throw error;
-    }
+    const result = await getPriceLogic(isin);
+
+    // Retour des données via le callback[cite: 3]
+    callback(null, {
+        confirmed: result.confirmed,
+        price: result.price
+    });
 }
 
-app.get('/confirmation/:isin', async (req, res) => {
-    const isin = req.params.isin;
-    console.info(`>>> Requête de confirmation reçue pour l'ISIN : ${isin}`);
+// Création et démarrage du serveur gRPC[cite: 3]
+const server = new gRPC.Server();
+server.addService(confirmationPackage.Confirmation.service, { ConfirmOrder });
 
-    try {
-        const data = await getPriceData(isin);
-        console.info(`Données reçues de l'université :`, data);
-
-        // 1. On récupère toutes les valeurs de l'objet (ex: ['1,023.94'])
-        const values = Object.values(data);
-
-        if (values.length > 0) {
-            // 2. On prend la première valeur et on enlève la virgule pour en faire un nombre
-            const priceString = values[0]; // '1,023.94'
-            const cleanPrice = parseFloat(priceString.replace(',', '')); // 1023.94
-
-            console.info(`Prix extrait et converti : ${cleanPrice}`);
-
-            res.status(200).json({
-                confirmed: true,
-                price: cleanPrice
-            });
-        } else {
-            console.warn("Aucune donnée de prix dans la réponse de l'université");
-            res.status(200).json({ confirmed: false, price: 0 });
-        }
-    } catch (error) {
-        console.error("Erreur lors de l'appel à l'API externe");
-        res.status(200).json({ confirmed: false, price: 0 });
+server.bindAsync("0.0.0.0:4000", gRPC.ServerCredentials.createInsecure(), (error, port) => {
+    if (error) {
+        console.error(`Failed to bind server: ${error.message}`);
+        return;
     }
+    console.log(`gRPC Server running at http://0.0.0.0:${port}`);
 });
-
-app.listen(PORT, () => console.info(`Confirmation Service on port ${PORT}`));

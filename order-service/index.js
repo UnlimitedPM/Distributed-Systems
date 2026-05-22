@@ -141,4 +141,18 @@ app.delete('/orders/:id', async (req, res) => {
     }
 });
 
+// GET /overload : Simule une charge CPU intense
+app.get('/overload', async (req, res) => {
+    console.log(">>> [REST] Requête de surcharge reçue");
+    
+    // Une double boucle synchrone pour saturer temporairement le CPU [cite: 288, 292]
+    for (let i = 0; i < 100; i++) {
+        for (let j = 0; j < 100000; j++) {
+            // Boucle vide bloquante [cite: 292]
+        }
+    }
+    
+    res.status(200).send("Success"); // [cite: 295]
+});
+
 app.listen(6010, () => console.info("Order Service running on port 6010"));

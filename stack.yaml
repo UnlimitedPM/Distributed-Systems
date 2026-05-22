@@ -3,7 +3,6 @@ version: '3.8'
 services:
   mysqlservice:
     image: mysql:8.0
-    restart: none
     environment:
       MYSQL_DATABASE: stock_service
       MYSQL_ROOT_PASSWORD: root
@@ -13,16 +12,17 @@ services:
       - "3307:3306"
     volumes:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql
-      
+
   confirmation-service:
-    build: ./confirmation-service
+    image: unlimitedpm/confirmation-service:latest
     ports:
       - "4000:4000"
+    deploy:
+      replicas: 2
 
-  order-service:
-    build: ./order-service
+  orderservice:
+    image: unlimitedpm/orderservice:latest
     ports:
       - "6010:6010"
-    depends_on:
-      - mysqlservice
-      - confirmation-service
+    deploy:
+      replicas: 2
